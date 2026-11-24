@@ -409,11 +409,26 @@ func (m *Manager) finishRefreshJob(job *authRefreshJob, retryAt time.Time, queue
 		return
 	}
 	delete(m.refreshJobs, job.id)
-	if auth := m.auths[job.id]; auth != nil && auth.RegistrationEpoch == job.registrationEpoch && auth.NextRefreshAfter.Equal(job.pendingUntil) {
-		// Clear only this job's pending marker, preserving newer refresh outcomes.
-		auth.NextRefreshAfter = retryAt
-		auth.Generation++
-		auth.UpdatedAt = time.Now()
+	if auth := m.auths[job.id]; auth != nil && auth.RegistrationEpoch == job.registrationEpoch {
+		now := time.Now()
+		changed := false
+		if auth.NextRefreshAfter.Equal(job.pendingUntil) {
+			// Clear only this job's pending marker, preserving newer refresh outcomes.
+			auth.NextRefreshAfter = retryAt
+			changed = true
+		}
+		// A job that ran must not leave its credential due again right away, whether
+		// the refresh returned early or recorded an outcome with a zero retry time.
+		// Otherwise the dispatcher re-queues it on a zero-duration timer and the
+		// dispatcher and worker spin at full CPU with no traffic.
+		if !queuedOnly && !auth.NextRefreshAfter.After(now) && m.shouldRefresh(auth, now) {
+			auth.NextRefreshAfter = now.Add(refreshCheckInterval)
+			changed = true
+		}
+		if changed {
+			auth.Generation++
+			auth.UpdatedAt = now
+		}
 	}
 	m.mu.Unlock()
 	// Notify the current loop, which may differ from the job's original loop.
